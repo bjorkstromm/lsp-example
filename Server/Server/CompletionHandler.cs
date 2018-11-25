@@ -1,4 +1,5 @@
-﻿using Newtonsoft.Json.Linq;
+﻿using Microsoft.Language.Xml;
+using Newtonsoft.Json.Linq;
 using OmniSharp.Extensions.LanguageServer.Protocol.Client.Capabilities;
 using OmniSharp.Extensions.LanguageServer.Protocol.Models;
 using OmniSharp.Extensions.LanguageServer.Protocol.Server;
@@ -21,6 +22,7 @@ namespace Server
 
         private readonly ILanguageServer _router;
         private readonly BufferManager _bufferManager;
+        private readonly NuGetAutoCompleteService _nuGetService;
 
         private readonly DocumentSelector _documentSelector = new DocumentSelector(
             new DocumentFilter()
@@ -31,10 +33,11 @@ namespace Server
 
         private CompletionCapability _capability;
 
-        public CompletionHandler(ILanguageServer router, BufferManager bufferManager)
+        public CompletionHandler(ILanguageServer router, BufferManager bufferManager, NuGetAutoCompleteService nuGetService)
         {
             _router = router;
             _bufferManager = bufferManager;
+            _nuGetService = nuGetService;
         }
 
         public CompletionRegistrationOptions GetRegistrationOptions()
@@ -51,78 +54,92 @@ namespace Server
             var documentPath = request.TextDocument.Uri.ToString();
             var buffer = _bufferManager.GetBuffer(documentPath);
 
-            if (string.IsNullOrEmpty(buffer))
+            if (buffer == null)
             {
                 return new CompletionList();
             }
 
-            var wordToComplete = GetWordToComplete(request, buffer);
+            var syntaxTree = Parser.Parse(buffer);
 
-            if (!string.IsNullOrWhiteSpace(wordToComplete))
+            var position = GetPosition(buffer.GetText(0, buffer.Length),
+                (int)request.Position.Line,
+                (int)request.Position.Character);
+
+            var node = syntaxTree.FindNode(position);
+
+            var attribute = node.AncestorNodes().OfType<XmlAttributeSyntax>().FirstOrDefault();
+            if (attribute != null && node.ParentElement.Name.Equals(PackageReferenceElement))
             {
-                using (var httpClient = new HttpClient())
+                if (attribute.Name.Equals(IncludeAttribute))
                 {
-                    var response = await httpClient.GetStringAsync($"https://api-v2v3search-0.nuget.org/autocomplete?q={wordToComplete}");
-                    var items = JObject.Parse(response)["data"].ToObject<List<string>>().Select(x => new CompletionItem
+                    var completions = await _nuGetService.GetPackages(attribute.Value);
+
+                    var diff = position - attribute.ValueNode.Start;
+
+                    return new CompletionList(completions.Select(x => new CompletionItem
                     {
                         Label = x,
-                    }).ToArray();
+                        Kind = CompletionItemKind.Reference,
+                        TextEdit = new TextEdit
+                        {
+                            NewText = x,
+                            Range = new Range(
+                                new Position
+                                {
+                                    Line = request.Position.Line,
+                                    Character = request.Position.Character - diff + 1
+                                }, new Position
+                                {
+                                    Line = request.Position.Line,
+                                    Character = request.Position.Character - diff + attribute.ValueNode.Width - 1
+                                })
+                        }
+                    }), isIncomplete: completions.Count > 1);
+                }
+                else if (attribute.Name.Equals(VersionAttribute))
+                {
+                    var includeNode = node.ParentElement.Attributes.FirstOrDefault(x => x.Name.Equals(IncludeAttribute));
 
-                    return new CompletionList(items.Length > 1, items);
+                    if (includeNode != null && !string.IsNullOrEmpty(includeNode.Value))
+                    {
+                        var versions = await _nuGetService.GetPackageVersions(includeNode.Value, attribute.Value);
+
+                        var diff = position - attribute.ValueNode.Start;
+
+                        return new CompletionList(versions.Select(x => new CompletionItem
+                        {
+                            Label = x,
+                            Kind = CompletionItemKind.Reference,
+                            TextEdit = new TextEdit
+                            {
+                                NewText = x,
+                                Range = new Range(
+                                    new Position
+                                    {
+                                        Line = request.Position.Line,
+                                        Character = request.Position.Character - diff + 1
+                                    }, new Position
+                                    {
+                                        Line = request.Position.Line,
+                                        Character = request.Position.Character - diff + attribute.ValueNode.Width - 1
+                                    })
+                            }
+                        }));
+                    }
                 }
             }
 
             return new CompletionList();
         }
 
-        private string GetWordToComplete(CompletionParams request, string buffer)
+        private static int GetPosition(string buffer, int line, int col)
         {
-            var line = (int)request.Position.Line;
-            var col = (int)request.Position.Character;
-            var bufferSpan = buffer.AsSpan();
-
-            // Find the position
-            var index = 0;
+            var position = 0;
             for (var i = 0; i < line; i++)
             {
-                index = buffer.IndexOf('\n', index) + 1;
+                position = buffer.IndexOf('\n', position) + 1;
             }
-            index += col;
-
-            // Find the last < char before position
-            var pos = index;
-            var elementStart = bufferSpan
-                .Slice(0, pos)
-                .LastIndexOf('<') + 1;
-
-            var elementToPos = bufferSpan.Slice(elementStart, pos - elementStart).TrimStart();
-
-            // Find if we are inside a <PackageReference  /> element
-            if (!elementToPos.StartsWith(PackageReferenceElement) ||
-                elementToPos.Contains(EndElement.AsSpan(), StringComparison.OrdinalIgnoreCase))
-            {
-                _router.Window.LogInfo($"Not inside a PackageReference");
-                return string.Empty;
-            }
-            _router.Window.LogInfo($"Inside PackageReference element");
-
-            var attributeEnd = elementToPos.LastIndexOf("=\"");
-            var attributeStart = elementToPos
-                .Slice(0, attributeEnd + 1)
-                .TrimEnd()
-                .LastIndexOf(' ') + 1;
-
-            var attribute = elementToPos.Slice(attributeStart, attributeEnd - attributeStart);
-            var attributeString = new string(attribute);
-            _router.Window.LogInfo($"Inside attribute {attributeString}");
-
-            var attributeValue = elementToPos
-                .Slice(attributeEnd + 2);
-            var wordToComplete = new string(attributeValue);
-
-            _router.Window.LogInfo($"Word to complete {wordToComplete}");
-
-            return wordToComplete;
+            return position + col;
         }
 
         public void SetCapability(CompletionCapability capability)

@@ -2,6 +2,7 @@
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Language.Xml;
 using OmniSharp.Extensions.Embedded.MediatR;
 using OmniSharp.Extensions.LanguageServer.Protocol;
 using OmniSharp.Extensions.LanguageServer.Protocol.Client.Capabilities;
@@ -52,7 +53,7 @@ namespace Server
             var documentPath = request.TextDocument.Uri.ToString();
             var text = request.ContentChanges.FirstOrDefault()?.Text;
 
-            _bufferManager.UpdateBuffer(documentPath, text);
+            _bufferManager.UpdateBuffer(documentPath, new StringBuffer(text));
 
             _router.Window.LogInfo($"Updated buffer for document: {documentPath}\n{text}");
 

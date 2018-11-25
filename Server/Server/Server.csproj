@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <PackageReference Include="OmniSharp.Extensions.LanguageServer" Version="0.10.0" />
+    <PackageReference Include="GuiLabs.Language.Xml" Version="1.2.27" />
   </ItemGroup>
 
 </Project>

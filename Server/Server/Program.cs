@@ -28,6 +28,7 @@ namespace Server
         static void ConfigureServices(IServiceCollection services)
         {
             services.AddSingleton<BufferManager>();
+            services.AddSingleton<NuGetAutoCompleteService>();
         }
     }
 }
